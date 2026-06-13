@@ -448,7 +448,7 @@ let currentUser = null;
 //  5. Paste your Client ID into DRIVE_CLIENT_ID below and save the file.
 
 const DRIVE_CLIENT_ID   = localStorage.getItem('chamaGithiomiClientId') || '';
-const DRIVE_SCOPE       = 'https://www.googleapis.com/auth/drive.appdata';
+const DRIVE_SCOPE       = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME   = 'githiomi_chama_data.json';
 
 let driveToken        = null;   // current access token
@@ -483,7 +483,8 @@ function drivePromptClientId() {
     'Enter your Google OAuth2 Client ID to enable Drive sync.\n\n' +
     'Get one free at:\nhttps://console.cloud.google.com/\n\n' +
     '(Create project → Enable Drive API → Credentials → OAuth 2.0 Client ID → Web application)\n\n' +
-    'Authorised JavaScript origins must include:  null  (for local file use)',
+    'Authorised JavaScript origins: https://skimotho.github.io\n' +
+    'Authorised redirect URIs: https://skimotho.github.io/githiomis/',
     DRIVE_CLIENT_ID
   );
   if (id && id.trim()) {
@@ -497,7 +498,7 @@ function driveSignIn() {
   if (!DRIVE_CLIENT_ID) { drivePromptClientId(); return; }
   const params = new URLSearchParams({
     client_id:     DRIVE_CLIENT_ID,
-    redirect_uri:  location.href.split('?')[0].split('#')[0],
+    redirect_uri:  location.origin + location.pathname,
     response_type: 'token',
     scope:         DRIVE_SCOPE,
     prompt:        'consent'
@@ -536,7 +537,7 @@ async function driveRequest(url, options={}) {
 
 async function driveFindFile() {
   const q   = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
-  const r   = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=appDataFolder,drive&fields=files(id,name)&pageSize=5`);
+  const r   = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=5`);
   const d   = await r.json();
   return (d.files && d.files.length) ? d.files[0].id : null;
 }
