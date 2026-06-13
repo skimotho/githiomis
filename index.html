@@ -482,7 +482,14 @@ function recalculateFromDate(changedDate) {
 
   for (const loan of affectedLoans) {
     // Remove old interest savings entries for this loan
-    DB.savings = DB.savings.filter(s=>!(s.isInterest && s.loanId===loan.id));
+    // Robust removal: match by loanId or repaymentId (handles entries from older file versions)
+    const repayIdsForThisLoan = new Set(DB.repayments.filter(r=>r.loanId===loan.id).map(r=>r.id));
+    DB.savings = DB.savings.filter(s => {
+      if (!s.isInterest) return true;
+      if (s.loanId === loan.id) return false;
+      if (repayIdsForThisLoan.has(s.repaymentId)) return false;
+      return true;
+    });
 
     // Recompute shares as of loan date with cleaned-up state
     loan.sharesAtIssuance = computeSharesAsOf(loan.date);
@@ -1211,8 +1218,16 @@ function recalcLoanShares(loanId) {
   // 1. Update shares snapshot
   loan.sharesAtIssuance = newShares;
 
-  // 2. Remove ALL old interest savings entries for this loan
-  DB.savings = DB.savings.filter(s => !(s.isInterest && s.loanId === loanId));
+  // 2. Remove ALL old interest savings entries for this loan.
+  // Use BOTH loanId AND repaymentId matching to handle entries saved by older
+  // versions of this file that may not have stored loanId on the savings entry.
+  const repayIdsForLoan = new Set(DB.repayments.filter(r=>r.loanId===loanId).map(r=>r.id));
+  DB.savings = DB.savings.filter(s => {
+    if (!s.isInterest) return true;                        // keep non-interest entries
+    if (s.loanId === loanId) return false;                 // remove if loanId matches
+    if (repayIdsForLoan.has(s.repaymentId)) return false;  // remove if repaymentId matches (handles older entries without loanId)
+    return true;                                           // keep unrelated interest entries
+  });
 
   // 3. Reprocess every repayment with correct shares
   let totalInterest = 0;
