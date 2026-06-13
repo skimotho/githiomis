@@ -962,7 +962,7 @@ function renderLoans() {
       <td class="bold${l.status==='active'?' gold':''}">${l.status==='active'?fmtKes(l.outstanding):'—'}</td>
       <td class="green">${fmtKes(l.interestPaid)}</td>
       <td><span class="badge ${l.status==='active'?'badge-gold':'badge-green'}">${l.status==='active'?'Active':'Repaid'}</span></td>
-      ${isAdmin?`<td>${l.status==='active'?`<button class="btn btn-sm btn-danger" onclick="deleteLoan(${l.id})">Delete</button>`:''}</td>`:'<td></td>'}
+      ${isAdmin?`<td><div class="btn-action-group">${l.status==='active'?`<button class="btn btn-sm btn-danger" onclick="deleteLoan(${l.id})">Delete</button>`:''}<button class="btn btn-sm btn-gold" onclick="recalcLoanShares(${l.id})" title="Recalculate interest distributions using correct shares as of loan date">↻ Recalc</button></div></td>`:'<td></td>'}
     </tr>`).join('');
 }
 
@@ -1180,42 +1180,49 @@ function recalcLoanShares(loanId) {
   const loan = DB.loans.find(l=>l.id===loanId);
   if (!loan) return;
 
-  const oldSnapshotTotal = loan.sharesAtIssuance.reduce((s,sh)=>s+sh.balance,0);
   const newShares = computeSharesAsOf(loan.date);
-  const newSnapshotTotal = newShares.reduce((s,sh)=>s+sh.balance,0);
+  const newSnapshotTotal = newShares.reduce((s,sh)=>s+sh.balance, 0);
+  const oldSnapshotTotal = loan.sharesAtIssuance.reduce((s,sh)=>s+sh.balance, 0);
 
-  // Build preview for confirmation
-  const lines = newShares.filter(sh=>sh.share>0).map(sh=>
-    `${MEMBERS[sh.memberIdx].split(' ')[0]}: ${(sh.share*100).toFixed(2)}% (Ksh ${sh.balance.toLocaleString()})`
-  ).join('\n');
+  if (newSnapshotTotal === 0) {
+    alert(`No savings found as of ${fmtDate(loan.date)}. Cannot compute shares.\nCheck that savings were recorded with a date on or before ${fmtDate(loan.date)}.`);
+    return;
+  }
 
-  const msg = `Re-snapshot shares for loan to ${MEMBERS[loan.borrowerIdx]} issued ${fmtDate(loan.date)}\n\n` +
-    `Old pool snapshot: ${fmtKes(oldSnapshotTotal)}\n` +
-    `New pool snapshot: ${fmtKes(newSnapshotTotal)}\n\n` +
-    `New shares:\n${lines}\n\n` +
-    `This will recalculate all past interest distributions for this loan.\nContinue?`;
+  // Build a readable preview of new shares and interest redistribution per repayment
+  const repays = DB.repayments.filter(r=>r.loanId===loanId).sort((a,b)=>a.date.localeCompare(b.date));
+  let previewLines = `Loan to: ${MEMBERS[loan.borrowerIdx]}\nIssued: ${fmtDate(loan.date)}\n`;
+  previewLines += `\nPool snapshot at loan date:\n`;
+  previewLines += `  Old: ${fmtKes(oldSnapshotTotal)} → New: ${fmtKes(newSnapshotTotal)}\n`;
+  previewLines += `\nNew interest shares:\n`;
+  newShares.filter(sh=>sh.share>0).forEach(sh=>{
+    previewLines += `  ${MEMBERS[sh.memberIdx].split(' ')[0]}: ${(sh.share*100).toFixed(2)}% (balance ${fmtKes(sh.balance)})\n`;
+  });
+  if (repays.length > 0) {
+    previewLines += `\nRepayments to recalculate (${repays.length}):\n`;
+    repays.forEach(r=>{
+      if(r.interestPaid>0) previewLines += `  ${fmtDate(r.date)} — interest ${fmtKes(r.interestPaid)} will be redistributed\n`;
+    });
+  }
+  previewLines += `\nAll member savings balances will update accordingly.\nContinue?`;
 
-  if (!confirm(msg)) return;
+  if (!confirm(previewLines)) return;
 
-  // Update shares and recalculate all interest distributions for this loan
+  // 1. Update shares snapshot
   loan.sharesAtIssuance = newShares;
 
-  // Remove old interest savings entries for this loan
-  DB.savings = DB.savings.filter(s=>!(s.isInterest && s.loanId===loanId));
+  // 2. Remove ALL old interest savings entries for this loan
+  DB.savings = DB.savings.filter(s => !(s.isInterest && s.loanId === loanId));
 
-  // Reprocess each repayment with new shares
-  const loanRepays = DB.repayments
-    .filter(r=>r.loanId===loanId)
-    .sort((a,b)=>a.date.localeCompare(b.date)||a.id-b.id);
-
-  let totalInt = 0;
-  for (const repay of loanRepays) {
+  // 3. Reprocess every repayment with correct shares
+  let totalInterest = 0;
+  for (const repay of repays) {
     const newDist = [];
     if (repay.interestPaid > 0) {
       for (const sh of loan.sharesAtIssuance) {
         const earned = repay.interestPaid * sh.share;
         if (earned > 0) {
-          newDist.push({memberIdx:sh.memberIdx, amount:earned});
+          newDist.push({ memberIdx: sh.memberIdx, amount: earned });
           DB.savings.push({
             id: nextId(DB.savings),
             month: parseInt(repay.date.split('-')[1]),
@@ -1231,16 +1238,20 @@ function recalcLoanShares(loanId) {
       }
     }
     repay.interestDistribution = newDist;
-    totalInt += repay.interestPaid;
+    totalInterest += repay.interestPaid;
   }
-  loan.interestPaid = totalInt;
+  loan.interestPaid = totalInterest;
 
   saveData();
-  alert('Shares re-snapshotted and interest distributions recalculated successfully.');
+
+  // Refresh all affected pages
   renderPage('loans');
   renderPage('repayments');
   renderPage('savings');
   renderPage('dashboard');
+  if (currentUser.role === 'member') renderPage('member-portal');
+
+  alert(`Done! Interest distributions for ${repays.filter(r=>r.interestPaid>0).length} repayment(s) recalculated.\nMember savings balances have been updated.`);
 }
 // ╔══════════════════════════════════════════════════════════╗
 // ║  INIT                                                    ║
