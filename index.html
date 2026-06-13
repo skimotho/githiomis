@@ -276,8 +276,11 @@
             <span style="font-size:22px">☁️</span><div><div style="color:var(--text-muted);font-weight:600">Connecting…</div></div>
           </div>
           <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+            <button class="btn btn-outline" onclick="driveSignIn()">🔑 Sign In to Google</button>
             <button class="btn btn-outline" onclick="driveSync_load()">🔃 Load from Drive</button>
             <button class="btn btn-primary" onclick="driveSync_push(JSON.stringify(DB))">☁️ Save to Drive Now</button>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:10px">Need a Client ID? <a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Set it up here</a></div>
           </div>
         </div>
       </div>
@@ -435,33 +438,138 @@ function saveData() {
 let DB = loadData();
 let currentUser = null;
 
-// ===== GOOGLE DRIVE SYNC =====
-const DRIVE_FILE_NAME = 'githiomi_chama_data.json';
-let driveFileId = localStorage.getItem('chamaGithiomiDriveFileId') || null;
-let driveSyncStatus = 'idle';
-let driveSyncLastSaved = localStorage.getItem('chamaGithiomiDriveLastSaved') || null;
-let driveSaveQueue = null;
-let driveSaveTimer = null;
+// ===== GOOGLE DRIVE SYNC (OAuth2 + Drive REST API) =====
+// HOW TO SET UP (one-time):
+//  1. Go to https://console.cloud.google.com/
+//  2. Create a project → Enable "Google Drive API"
+//  3. OAuth consent screen → External → add your Gmail as test user
+//  4. Credentials → Create OAuth client ID → Web application
+//     Authorised JavaScript origins: add  http://localhost  AND  null  (for file://)
+//  5. Paste your Client ID into DRIVE_CLIENT_ID below and save the file.
 
+const DRIVE_CLIENT_ID   = localStorage.getItem('chamaGithiomiClientId') || '';
+const DRIVE_SCOPE       = 'https://www.googleapis.com/auth/drive.appdata';
+const DRIVE_FILE_NAME   = 'githiomi_chama_data.json';
+
+let driveToken        = null;   // current access token
+let driveFileId       = localStorage.getItem('chamaGithiomiDriveFileId') || null;
+let driveSyncStatus   = 'idle';
+let driveSyncLastSaved= localStorage.getItem('chamaGithiomiDriveLastSaved') || null;
+let driveSaveQueue    = null;
+let driveSaveTimer    = null;
+
+// ── UI helpers ──────────────────────────────────────────────────────────────
 function driveSetStatus(status, msg) {
   driveSyncStatus = status;
   if (driveSyncLastSaved) localStorage.setItem('chamaGithiomiDriveLastSaved', driveSyncLastSaved);
   const el = document.getElementById('drive-sync-status');
   if (!el) return;
-  const icons = {idle:'☁️', syncing:'🔄', ok:'✅', error:'❌'};
-  const colors = {idle:'var(--text-muted)', syncing:'var(--gold)', ok:'var(--green-mid)', error:'var(--red)'};
-  const labels = {idle:'Not synced yet', syncing:'Saving to Drive…', ok:'Saved to Drive', error:'Sync failed'};
-  el.innerHTML = `<span style="font-size:22px">${icons[status]}</span>
+  const icons  = {idle:'☁️', syncing:'🔄', ok:'✅', error:'❌', setup:'⚙️'};
+  const colors = {idle:'var(--text-muted)', syncing:'var(--gold)', ok:'var(--green-mid)', error:'var(--red)', setup:'var(--gold)'};
+  const labels = {idle:'Not signed in', syncing:'Saving…', ok:'Saved to Drive', error:'Sync failed', setup:'Setup required'};
+  el.innerHTML = `<span style="font-size:22px">${icons[status]||'☁️'}</span>
     <div>
-      <div style="color:${colors[status]};font-weight:600">${labels[status]}</div>
-      ${msg ? `<div style="color:var(--text-muted);font-size:12px">${msg}</div>` : ''}
-      ${driveSyncLastSaved ? `<div style="color:var(--text-muted);font-size:12px">Last saved: ${new Date(driveSyncLastSaved).toLocaleString()}</div>` : ''}
+      <div style="color:${colors[status]||'var(--text-muted)'};font-weight:600">${labels[status]||status}</div>
+      ${msg ? `<div style="color:var(--text-muted);font-size:12px;margin-top:2px">${msg}</div>` : ''}
+      ${driveSyncLastSaved && status==='ok' ? `<div style="color:var(--text-muted);font-size:12px">Last saved: ${new Date(driveSyncLastSaved).toLocaleString()}</div>` : ''}
     </div>`;
   const ti = document.getElementById('drive-topbar-indicator');
-  if (ti) { ti.textContent = icons[status]; ti.title = labels[status]; ti.style.opacity = status==='idle'?'0.5':'1'; }
+  if (ti) { ti.textContent = icons[status]||'☁️'; ti.title = labels[status]||status; ti.style.opacity = (status==='idle'||status==='setup') ? '0.5':'1'; }
 }
 
+// ── Client-ID setup prompt ──────────────────────────────────────────────────
+function drivePromptClientId() {
+  const id = prompt(
+    'Enter your Google OAuth2 Client ID to enable Drive sync.\n\n' +
+    'Get one free at:\nhttps://console.cloud.google.com/\n\n' +
+    '(Create project → Enable Drive API → Credentials → OAuth 2.0 Client ID → Web application)\n\n' +
+    'Authorised JavaScript origins must include:  null  (for local file use)',
+    DRIVE_CLIENT_ID
+  );
+  if (id && id.trim()) {
+    localStorage.setItem('chamaGithiomiClientId', id.trim());
+    location.reload();
+  }
+}
+
+// ── OAuth2 implicit flow ────────────────────────────────────────────────────
+function driveSignIn() {
+  if (!DRIVE_CLIENT_ID) { drivePromptClientId(); return; }
+  const params = new URLSearchParams({
+    client_id:     DRIVE_CLIENT_ID,
+    redirect_uri:  location.href.split('?')[0].split('#')[0],
+    response_type: 'token',
+    scope:         DRIVE_SCOPE,
+    prompt:        'consent'
+  });
+  window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params;
+}
+
+function driveHandleOAuthCallback() {
+  const hash = window.location.hash;
+  if (!hash.includes('access_token')) return false;
+  const params = new URLSearchParams(hash.slice(1));
+  const token  = params.get('access_token');
+  if (!token) return false;
+  driveToken = token;
+  sessionStorage.setItem('chamaGithiomiDriveToken', token);
+  // Clean the URL
+  history.replaceState(null, '', window.location.pathname);
+  return true;
+}
+
+function driveRestoreToken() {
+  const t = sessionStorage.getItem('chamaGithiomiDriveToken');
+  if (t) { driveToken = t; return true; }
+  return false;
+}
+
+// ── Drive REST helpers ──────────────────────────────────────────────────────
+async function driveRequest(url, options={}) {
+  const resp = await fetch(url, {
+    ...options,
+    headers: { 'Authorization': 'Bearer ' + driveToken, ...(options.headers||{}) }
+  });
+  if (resp.status === 401) { driveToken = null; sessionStorage.removeItem('chamaGithiomiDriveToken'); throw new Error('auth'); }
+  return resp;
+}
+
+async function driveFindFile() {
+  const q   = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+  const r   = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=appDataFolder,drive&fields=files(id,name)&pageSize=5`);
+  const d   = await r.json();
+  return (d.files && d.files.length) ? d.files[0].id : null;
+}
+
+async function driveReadFile(fileId) {
+  const r = await driveRequest(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  return r.text();
+}
+
+async function driveWriteFile(fileId, jsonStr) {
+  const blob    = new Blob([jsonStr], {type:'application/json'});
+  const method  = fileId ? 'PATCH' : 'POST';
+  const url     = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+
+  if (fileId) {
+    const r = await driveRequest(url, {method, body: blob, headers:{'Content-Type':'application/json'}});
+    const d = await r.json(); return d.id || fileId;
+  } else {
+    // Multipart: metadata + content
+    const meta = JSON.stringify({name: DRIVE_FILE_NAME, mimeType:'application/json'});
+    const form  = new FormData();
+    form.append('metadata', new Blob([meta], {type:'application/json'}));
+    form.append('file',     blob);
+    const r = await driveRequest(url, {method:'POST', body: form});
+    const d = await r.json(); return d.id;
+  }
+}
+
+// ── Public sync functions ───────────────────────────────────────────────────
 async function driveSync_save() {
+  if (!driveToken) return;   // not signed in — silently skip
   driveSaveQueue = JSON.stringify(DB);
   if (driveSaveTimer) clearTimeout(driveSaveTimer);
   driveSaveTimer = setTimeout(async () => {
@@ -471,100 +579,53 @@ async function driveSync_save() {
 }
 
 async function driveSync_push(jsonStr) {
+  if (!driveToken) { driveSignIn(); return; }
   driveSetStatus('syncing');
   try {
-    const prompt = driveFileId
-      ? `Update the Google Drive file with id "${driveFileId}" (filename: "${DRIVE_FILE_NAME}") with this new content. If not found, create a new file. Content:\n${jsonStr}`
-      : `Create a new Google Drive file named "${DRIVE_FILE_NAME}" with mime type application/json (do NOT convert to Google Docs format). Content:\n${jsonStr}`;
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','anthropic-beta':'mcp-client-2025-04-04'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-6', max_tokens:512,
-        system:`You manage Google Drive files. After performing the operation, reply ONLY with valid JSON: {"ok":true,"fileId":"<id>"} or {"ok":false,"error":"<msg>"}. No markdown, no extra text.`,
-        messages:[{role:'user',content:prompt}],
-        mcp_servers:[{type:'url',url:'https://drivemcp.googleapis.com/mcp/v1',name:'gdrive'}]
-      })
-    });
-    const data = await resp.json();
-    // Try to find fileId from tool results first
-    let fileId = null;
-    for (const b of (data.content||[])) {
-      if (b.type==='mcp_tool_result') {
-        try { const p=JSON.parse(b.content?.[0]?.text||'{}'); if(p.id){fileId=p.id;break;} } catch(e){}
-      }
-    }
-    // Fallback: parse Claude text
-    if (!fileId) {
-      const txt = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-      try { const p=JSON.parse(txt.replace(/```json|```/g,'').trim()); if(p.fileId)fileId=p.fileId; } catch(e){}
-    }
-    if (fileId) { driveFileId=fileId; localStorage.setItem('chamaGithiomiDriveFileId',fileId); }
+    if (!driveFileId) driveFileId = await driveFindFile();
+    const newId = await driveWriteFile(driveFileId, jsonStr);
+    if (newId) { driveFileId = newId; localStorage.setItem('chamaGithiomiDriveFileId', newId); }
     driveSyncLastSaved = new Date().toISOString();
-    driveSetStatus('ok', driveFileId ? 'Synced \u2714' : '');
+    driveSetStatus('ok', '');
   } catch(err) {
-    const msg = err.message||'Network error';
-    const hint = (msg.includes('401')||msg.toLowerCase().includes('auth')) ? 'Re-connect Google Drive in Settings → Connectors' : msg;
-    driveSetStatus('error', hint);
+    if (err.message === 'auth') driveSetStatus('error', 'Session expired — click Sign In to Drive');
+    else driveSetStatus('error', err.message || 'Save failed');
   }
 }
 
 async function driveSync_load() {
-  driveSetStatus('syncing', 'Connecting to Drive\u2026');
+  if (!driveToken) {
+    if (!DRIVE_CLIENT_ID) driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
+    else driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Sign in to Google Drive</a>');
+    return;
+  }
+  driveSetStatus('syncing', 'Connecting to Drive…');
   try {
-    const searchPrompt = driveFileId
-      ? `Download the Google Drive file with id "${driveFileId}". Return ONLY its raw JSON text content, nothing else.`
-      : `Search Google Drive for a file named "${DRIVE_FILE_NAME}". If found, download it and return ONLY its raw JSON content. If not found, return {"found":false}.`;
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json','anthropic-beta':'mcp-client-2025-04-04'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-6', max_tokens:8192,
-        system:`You are a Google Drive assistant. Return ONLY the raw JSON content of the requested file. No markdown, no explanation, no code fences.`,
-        messages:[{role:'user',content:searchPrompt}],
-        mcp_servers:[{type:'url',url:'https://drivemcp.googleapis.com/mcp/v1',name:'gdrive'}]
-      })
-    });
-    const data = await resp.json();
-    let found = null;
-    // Scan tool results for the data
-    for (const b of (data.content||[])) {
-      if (b.type==='mcp_tool_result') {
-        // Could be search results (with files array) or file content
-        const txt = b.content?.[0]?.text || '';
-        try {
-          const p = JSON.parse(txt);
-          if (p.files && p.files.length>0 && !driveFileId) {
-            driveFileId = p.files[0].id;
-            localStorage.setItem('chamaGithiomiDriveFileId', driveFileId);
-          } else if (p.adminPass && Array.isArray(p.mgr)) {
-            found = p;
-          }
-        } catch(e) {}
-      }
-    }
-    // Scan text blocks for data
-    if (!found) {
-      const txt = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-      try {
-        const p = JSON.parse(txt.replace(/```json|```/g,'').trim());
-        if (p.adminPass && Array.isArray(p.mgr)) found = p;
-      } catch(e) {}
-    }
-    if (found) {
-      DB = found; localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
+    if (!driveFileId) driveFileId = await driveFindFile();
+    if (!driveFileId) { driveSetStatus('idle', 'No backup found on Drive yet'); return; }
+    const txt = await driveReadFile(driveFileId);
+    const parsed = JSON.parse(txt);
+    if (parsed.adminPass && Array.isArray(parsed.mgr)) {
+      DB = parsed;
+      localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
       driveSyncLastSaved = new Date().toISOString();
       driveSetStatus('ok', 'Loaded from Drive');
-      if (document.getElementById('app').style.display !== 'none') renderPage('dashboard');
-    } else {
-      driveSetStatus('idle', driveFileId ? 'Could not load — using local data' : 'No Drive backup found');
-    }
+      if (document.getElementById('app') && document.getElementById('app').style.display !== 'none') renderPage('dashboard');
+    } else { driveSetStatus('idle', 'File found but data looks invalid'); }
   } catch(err) {
-    const msg = err.message||'Failed to connect';
-    const hint = (msg.includes('401')||msg.toLowerCase().includes('auth')) ? 'Re-connect Google Drive in Settings → Connectors' : msg;
-    driveSetStatus('error', hint);
+    if (err.message === 'auth') driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Sign in to Google Drive</a>');
+    else driveSetStatus('error', err.message || 'Load failed');
   }
 }
 
-window.addEventListener('load', () => { setTimeout(driveSync_load, 1000); });
+window.addEventListener('load', () => {
+  const gotToken = driveHandleOAuthCallback() || driveRestoreToken();
+  if (!gotToken && !DRIVE_CLIENT_ID) {
+    driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
+    return;
+  }
+  setTimeout(driveSync_load, 800);
+});
 
 // ╔══════════════════════════════════════════════════════════╗
 // ║  CORE BUSINESS LOGIC                                     ║
