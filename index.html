@@ -483,11 +483,15 @@ function recalculateFromDate(changedDate) {
   for (const loan of affectedLoans) {
     // Remove old interest savings entries for this loan
     // Robust removal: match by loanId or repaymentId (handles entries from older file versions)
-    const repayIdsForThisLoan = new Set(DB.repayments.filter(r=>r.loanId===loan.id).map(r=>r.id));
+    // Also catch orphaned entries (no loanId, no repaymentId) on known repayment dates for this loan.
+    const repaysForThisLoan = DB.repayments.filter(r=>r.loanId===loan.id);
+    const repayIdsForThisLoan = new Set(repaysForThisLoan.map(r=>r.id));
+    const repayDatesForThisLoan = new Set(repaysForThisLoan.map(r=>r.date));
     DB.savings = DB.savings.filter(s => {
       if (!s.isInterest) return true;
       if (s.loanId === loan.id) return false;
       if (repayIdsForThisLoan.has(s.repaymentId)) return false;
+      if (!s.loanId && !s.repaymentId && repayDatesForThisLoan.has(s.date)) return false;
       return true;
     });
 
@@ -975,7 +979,16 @@ function renderLoans() {
 
 function deleteLoan(id) {
   if(!confirm('Delete this loan and all its repayments and interest entries?'))return;
-  DB.savings=DB.savings.filter(s=>!(s.isInterest&&s.loanId===id));
+  const repaysOfLoan = DB.repayments.filter(r=>r.loanId===id);
+  const repayIdsOfLoan = new Set(repaysOfLoan.map(r=>r.id));
+  const repayDatesOfLoan = new Set(repaysOfLoan.map(r=>r.date));
+  DB.savings = DB.savings.filter(s => {
+    if (!s.isInterest) return true;
+    if (s.loanId === id) return false;
+    if (repayIdsOfLoan.has(s.repaymentId)) return false;
+    if (!s.loanId && !s.repaymentId && repayDatesOfLoan.has(s.date)) return false;
+    return true;
+  });
   DB.repayments=DB.repayments.filter(r=>r.loanId!==id);
   DB.loans=DB.loans.filter(l=>l.id!==id);
   saveData(); renderPage('loans'); renderPage('dashboard');
@@ -1221,11 +1234,17 @@ function recalcLoanShares(loanId) {
   // 2. Remove ALL old interest savings entries for this loan.
   // Use BOTH loanId AND repaymentId matching to handle entries saved by older
   // versions of this file that may not have stored loanId on the savings entry.
-  const repayIdsForLoan = new Set(DB.repayments.filter(r=>r.loanId===loanId).map(r=>r.id));
+  // Also catch fully-orphaned entries (no loanId, no repaymentId) that fall on
+  // a repayment date for this loan — these are legacy duplicates from before IDs were tracked.
+  const repaysForLoan = DB.repayments.filter(r=>r.loanId===loanId);
+  const repayIdsForLoan = new Set(repaysForLoan.map(r=>r.id));
+  const repayDatesForLoan = new Set(repaysForLoan.map(r=>r.date));
   DB.savings = DB.savings.filter(s => {
     if (!s.isInterest) return true;                        // keep non-interest entries
     if (s.loanId === loanId) return false;                 // remove if loanId matches
     if (repayIdsForLoan.has(s.repaymentId)) return false;  // remove if repaymentId matches (handles older entries without loanId)
+    // remove orphaned interest entries (no loanId, no repaymentId) on known repayment dates for this loan
+    if (!s.loanId && !s.repaymentId && repayDatesForLoan.has(s.date)) return false;
     return true;                                           // keep unrelated interest entries
   });
 
