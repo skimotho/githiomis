@@ -477,7 +477,7 @@ async function driveSync_push(jsonStr) {
       ? `Update the Google Drive file with id "${driveFileId}" (filename: "${DRIVE_FILE_NAME}") with this new content. If not found, create a new file. Content:\n${jsonStr}`
       : `Create a new Google Drive file named "${DRIVE_FILE_NAME}" with mime type application/json (do NOT convert to Google Docs format). Content:\n${jsonStr}`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json','anthropic-beta':'mcp-client-2025-04-04'},
       body: JSON.stringify({
         model:'claude-sonnet-4-6', max_tokens:512,
         system:`You manage Google Drive files. After performing the operation, reply ONLY with valid JSON: {"ok":true,"fileId":"<id>"} or {"ok":false,"error":"<msg>"}. No markdown, no extra text.`,
@@ -501,7 +501,11 @@ async function driveSync_push(jsonStr) {
     if (fileId) { driveFileId=fileId; localStorage.setItem('chamaGithiomiDriveFileId',fileId); }
     driveSyncLastSaved = new Date().toISOString();
     driveSetStatus('ok', driveFileId ? 'Synced \u2714' : '');
-  } catch(err) { driveSetStatus('error', err.message||'Network error'); }
+  } catch(err) {
+    const msg = err.message||'Network error';
+    const hint = (msg.includes('401')||msg.toLowerCase().includes('auth')) ? 'Re-connect Google Drive in Settings → Connectors' : msg;
+    driveSetStatus('error', hint);
+  }
 }
 
 async function driveSync_load() {
@@ -511,7 +515,7 @@ async function driveSync_load() {
       ? `Download the Google Drive file with id "${driveFileId}". Return ONLY its raw JSON text content, nothing else.`
       : `Search Google Drive for a file named "${DRIVE_FILE_NAME}". If found, download it and return ONLY its raw JSON content. If not found, return {"found":false}.`;
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json','anthropic-beta':'mcp-client-2025-04-04'},
       body: JSON.stringify({
         model:'claude-sonnet-4-6', max_tokens:8192,
         system:`You are a Google Drive assistant. Return ONLY the raw JSON content of the requested file. No markdown, no explanation, no code fences.`,
@@ -553,7 +557,11 @@ async function driveSync_load() {
     } else {
       driveSetStatus('idle', driveFileId ? 'Could not load — using local data' : 'No Drive backup found');
     }
-  } catch(err) { driveSetStatus('error', err.message||'Failed to connect'); }
+  } catch(err) {
+    const msg = err.message||'Failed to connect';
+    const hint = (msg.includes('401')||msg.toLowerCase().includes('auth')) ? 'Re-connect Google Drive in Settings → Connectors' : msg;
+    driveSetStatus('error', hint);
+  }
 }
 
 window.addEventListener('load', () => { setTimeout(driveSync_load, 1000); });
