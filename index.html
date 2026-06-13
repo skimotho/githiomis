@@ -341,13 +341,21 @@
 
 <!-- Loan Modal -->
 <div class="modal-overlay" id="modal-loan">
-  <div class="modal">
+  <div class="modal" style="width:640px">
     <div class="modal-title">Issue New Loan</div>
     <div class="form-single form-group"><label>Date Issued</label><input type="date" id="loan-date" oninput="updateLoanPreview()"></div>
     <div class="form-single form-group"><label>Borrower</label><select id="loan-borrower"></select></div>
     <div class="form-single form-group"><label>Loan Amount (Ksh)</label><input type="number" id="loan-amount" placeholder="e.g. 5000" min="1" oninput="updateLoanPreview()"></div>
     <div class="alert alert-info" id="loan-pool-info"></div>
-    <div class="alert alert-warn" id="loan-shares-preview" style="display:none"></div>
+    <div class="alert alert-error" id="loan-date-warn" style="display:none"></div>
+    <div id="loan-shares-table" style="display:none;margin-bottom:16px">
+      <div style="font-size:13px;font-weight:600;color:var(--text-mid);margin-bottom:8px">Member balances as of selected date (these determine interest shares):</div>
+      <div class="table-wrap" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">
+        <table style="font-size:12px"><thead><tr><th>Member</th><th>Balance as of Date</th><th>Share %</th><th>Est. Interest/mo</th></tr></thead>
+        <tbody id="loan-shares-tbody"></tbody></table>
+      </div>
+    </div>
+    <div class="alert alert-error" id="loan-amount-warn" style="display:none"></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal('modal-loan')">Cancel</button>
       <button class="btn btn-primary" onclick="saveLoan()">Issue Loan</button>
@@ -867,20 +875,49 @@ function openLoanModal() {
 }
 
 function updateLoanPreview() {
-  const date=document.getElementById('loan-date').value || new Date().toISOString().split('T')[0];
-  const pool=getAvailableLoanPool();
-  document.getElementById('loan-pool-info').textContent=`Available pool as of today: ${fmtKes(pool)} (total savings: ${fmtKes(getTotalSavingsPool())})`;
-  const amount=parseFloat(document.getElementById('loan-amount').value)||0;
-  const prev=document.getElementById('loan-shares-preview');
-  if(!amount){prev.style.display='none';return;}
-  if(amount>pool){prev.className='alert alert-error';prev.style.display='block';prev.textContent=`Amount exceeds available pool (${fmtKes(pool)})!`;return;}
-  const shares=computeSharesAsOf(date);
-  const monthlyInt=amount*0.1;
-  const totalPool=shares.reduce((s,sh)=>s+sh.balance,0);
-  if(totalPool===0){prev.style.display='none';return;}
-  const lines=shares.filter(sh=>sh.share>0).map(sh=>`${MEMBERS[sh.memberIdx].split(' ')[0]} (${(sh.share*100).toFixed(1)}%): ${fmtKes(sh.share*monthlyInt)}/mo`).join(' • ');
-  prev.className='alert alert-warn';prev.style.display='block';
-  prev.innerHTML=`<strong>Shares locked as of ${fmtDate(date)} • Est. interest/month: ${fmtKes(monthlyInt)}</strong><br><span style="font-size:12px">${lines}</span>`;
+  const date = document.getElementById('loan-date').value || new Date().toISOString().split('T')[0];
+  const pool = getAvailableLoanPool();
+  document.getElementById('loan-pool-info').textContent =
+    `Available pool (current): ${fmtKes(pool)} | Total savings: ${fmtKes(getTotalSavingsPool())}`;
+
+  // Check if loan date is before the most recent savings date
+  const latestSavDate = DB.savings.filter(s=>!s.isInterest).reduce((m,s)=>s.date>m?s.date:m,'');
+  const dateWarn = document.getElementById('loan-date-warn');
+  if (latestSavDate && date < latestSavDate) {
+    dateWarn.style.display = 'block';
+    dateWarn.innerHTML = `⚠️ <strong>Loan date (${fmtDate(date)}) is earlier than the most recent savings entry (${fmtDate(latestSavDate)}).</strong><br>Those savings will NOT be included in interest shares. Update the loan date to ${fmtDate(latestSavDate)} or later to include all contributions.`;
+  } else {
+    dateWarn.style.display = 'none';
+  }
+
+  // Always show member balance snapshot for the selected date
+  const shares = computeSharesAsOf(date);
+  const snapshotTotal = shares.reduce((s,sh)=>s+sh.balance, 0);
+  const amount = parseFloat(document.getElementById('loan-amount').value) || 0;
+  const monthlyInt = amount * 0.1;
+  const amtWarn = document.getElementById('loan-amount-warn');
+
+  const tbody = document.getElementById('loan-shares-tbody');
+  const tableWrap = document.getElementById('loan-shares-table');
+  if (snapshotTotal > 0) {
+    tableWrap.style.display = 'block';
+    tbody.innerHTML = shares.map(sh => `<tr>
+      <td>${MEMBERS[sh.memberIdx]}</td>
+      <td class="bold">${fmtKes(sh.balance)}</td>
+      <td>${(sh.share*100).toFixed(2)}%</td>
+      <td class="green">${amount>0?fmtKes(sh.share*monthlyInt):'—'}</td>
+    </tr>`).join('');
+  } else {
+    tableWrap.style.display = 'none';
+  }
+
+  if (!amount) { amtWarn.style.display='none'; return; }
+  if (amount > pool) {
+    amtWarn.className='alert alert-error'; amtWarn.style.display='block';
+    amtWarn.textContent=`Amount exceeds available pool (${fmtKes(pool)})!`;
+  } else {
+    amtWarn.style.display='none';
+  }
 }
 
 function saveLoan() {
@@ -900,7 +937,23 @@ function renderLoans() {
   const tbody=document.getElementById('loans-tbody');
   const active=DB.loans.filter(l=>l.status==='active');
   document.getElementById('active-loans-wrap').innerHTML=active.length
-    ?`<div class="card"><div class="card-title">Active Loans</div>${active.map(l=>`<div class="loan-block" style="margin-bottom:10px"><div class="lb-name">${MEMBERS[l.borrowerIdx]}</div><div class="lb-detail">Issued ${fmtDate(l.date)} • Principal: ${fmtKes(l.principal)} • Monthly interest: ${fmtKes(l.outstanding*0.1)}</div><div class="lb-amount">${fmtKes(l.outstanding)} outstanding</div></div>`).join('')}</div>`:'';
+    ?`<div class="card"><div class="card-title">Active Loans</div>${active.map(l=>{
+      const snapshotTotal = l.sharesAtIssuance.reduce((s,sh)=>s+sh.balance,0);
+      const shareRows = l.sharesAtIssuance.filter(sh=>sh.share>0).map(sh=>
+        `${MEMBERS[sh.memberIdx].split(' ')[0]}: ${(sh.share*100).toFixed(1)}% (${fmtKes(sh.balance)})`
+      ).join(' • ');
+      return `<div class="loan-block" style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+          <div>
+            <div class="lb-name">${MEMBERS[l.borrowerIdx]}</div>
+            <div class="lb-detail">Issued ${fmtDate(l.date)} • Principal: ${fmtKes(l.principal)} • Monthly interest: ${fmtKes(l.outstanding*0.1)}</div>
+            <div class="lb-amount">${fmtKes(l.outstanding)} outstanding</div>
+            <div style="font-size:11px;opacity:.75;margin-top:6px">Shares (pool snapshot: ${fmtKes(snapshotTotal)}): ${shareRows}</div>
+          </div>
+          <button class="btn btn-gold btn-sm" style="white-space:nowrap;margin-top:4px" onclick="recalcLoanShares(${l.id})">↻ Re-snapshot Shares</button>
+        </div>
+      </div>`;
+    }).join('')}</div>`:'';
   if(!DB.loans.length){tbody.innerHTML='<tr><td colspan="7" class="center muted">No loans issued yet</td></tr>';return;}
   tbody.innerHTML=[...DB.loans].reverse().map(l=>`
     <tr>
@@ -1119,6 +1172,76 @@ function openModal(id){document.getElementById(id).classList.add('open');}
 function closeModal(id){document.getElementById(id).classList.remove('open');}
 document.querySelectorAll('.modal-overlay').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('open');}));
 
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  RECALCULATE LOAN SHARES (re-snapshot as of loan date)  ║
+// ╚══════════════════════════════════════════════════════════╝
+function recalcLoanShares(loanId) {
+  const loan = DB.loans.find(l=>l.id===loanId);
+  if (!loan) return;
+
+  const oldSnapshotTotal = loan.sharesAtIssuance.reduce((s,sh)=>s+sh.balance,0);
+  const newShares = computeSharesAsOf(loan.date);
+  const newSnapshotTotal = newShares.reduce((s,sh)=>s+sh.balance,0);
+
+  // Build preview for confirmation
+  const lines = newShares.filter(sh=>sh.share>0).map(sh=>
+    `${MEMBERS[sh.memberIdx].split(' ')[0]}: ${(sh.share*100).toFixed(2)}% (Ksh ${sh.balance.toLocaleString()})`
+  ).join('\n');
+
+  const msg = `Re-snapshot shares for loan to ${MEMBERS[loan.borrowerIdx]} issued ${fmtDate(loan.date)}\n\n` +
+    `Old pool snapshot: ${fmtKes(oldSnapshotTotal)}\n` +
+    `New pool snapshot: ${fmtKes(newSnapshotTotal)}\n\n` +
+    `New shares:\n${lines}\n\n` +
+    `This will recalculate all past interest distributions for this loan.\nContinue?`;
+
+  if (!confirm(msg)) return;
+
+  // Update shares and recalculate all interest distributions for this loan
+  loan.sharesAtIssuance = newShares;
+
+  // Remove old interest savings entries for this loan
+  DB.savings = DB.savings.filter(s=>!(s.isInterest && s.loanId===loanId));
+
+  // Reprocess each repayment with new shares
+  const loanRepays = DB.repayments
+    .filter(r=>r.loanId===loanId)
+    .sort((a,b)=>a.date.localeCompare(b.date)||a.id-b.id);
+
+  let totalInt = 0;
+  for (const repay of loanRepays) {
+    const newDist = [];
+    if (repay.interestPaid > 0) {
+      for (const sh of loan.sharesAtIssuance) {
+        const earned = repay.interestPaid * sh.share;
+        if (earned > 0) {
+          newDist.push({memberIdx:sh.memberIdx, amount:earned});
+          DB.savings.push({
+            id: nextId(DB.savings),
+            month: parseInt(repay.date.split('-')[1]),
+            year:  parseInt(repay.date.split('-')[0]),
+            date:  repay.date,
+            memberIdx: sh.memberIdx,
+            amount: earned,
+            isInterest: true,
+            loanId: loanId,
+            repaymentId: repay.id
+          });
+        }
+      }
+    }
+    repay.interestDistribution = newDist;
+    totalInt += repay.interestPaid;
+  }
+  loan.interestPaid = totalInt;
+
+  saveData();
+  alert('Shares re-snapshotted and interest distributions recalculated successfully.');
+  renderPage('loans');
+  renderPage('repayments');
+  renderPage('savings');
+  renderPage('dashboard');
+}
 // ╔══════════════════════════════════════════════════════════╗
 // ║  INIT                                                    ║
 // ╚══════════════════════════════════════════════════════════╝
