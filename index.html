@@ -157,6 +157,7 @@
   <div class="topbar">
     <div class="topbar-brand">Githiomi <span>Chama</span></div>
     <div class="topbar-right">
+        <span id="drive-topbar-indicator" title="Google Drive Sync" style="font-size:18px;cursor:pointer;opacity:0.5;transition:opacity .2s" onclick="driveSync_load()">☁️</span>
       <div class="topbar-user" id="topbar-user"></div>
       <button class="btn btn-outline btn-sm" style="color:rgba(255,255,255,.8);border-color:rgba(255,255,255,.3)" onclick="logout()">Sign Out</button>
     </div>
@@ -267,6 +268,18 @@
         <div class="card" style="text-align:center"><div style="font-size:32px;margin-bottom:12px">👥</div><div style="font-weight:700;margin-bottom:8px">Member Balances</div><div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Current savings per member</div><button class="btn btn-outline btn-full" onclick="exportCSV('members')">Download CSV</button></div>
         <div class="card" style="text-align:center"><div style="font-size:32px;margin-bottom:12px">🗄️</div><div style="font-weight:700;margin-bottom:8px">Full Backup</div><div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Export all data as JSON</div><button class="btn btn-gold btn-full" onclick="exportJSON()">Export JSON</button></div>
         <div class="card" style="text-align:center"><div style="font-size:32px;margin-bottom:12px">📥</div><div style="font-weight:700;margin-bottom:8px">Restore Backup</div><div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Import a previously exported JSON</div><label class="btn btn-outline btn-full" style="cursor:pointer">Import JSON<input type="file" accept=".json" style="display:none" onchange="importJSON(event)"></label></div>
+        <div class="card" style="text-align:center;grid-column:1/-1">
+          <div style="font-size:32px;margin-bottom:12px">🔄</div>
+          <div style="font-weight:700;margin-bottom:8px">Google Drive Sync</div>
+          <div style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Data is automatically saved to your Google Drive after every change.</div>
+          <div id="drive-sync-status" style="display:flex;align-items:center;gap:12px;justify-content:center;margin-bottom:16px;padding:14px;background:var(--cream);border-radius:8px;border:1px solid var(--border)">
+            <span style="font-size:22px">☁️</span><div><div style="color:var(--text-muted);font-weight:600">Connecting…</div></div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+            <button class="btn btn-outline" onclick="driveSync_load()">🔃 Load from Drive</button>
+            <button class="btn btn-primary" onclick="driveSync_push(JSON.stringify(DB))">☁️ Save to Drive Now</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -415,9 +428,135 @@ function loadData() {
   try { const d=localStorage.getItem('chamaGithiomi'); if(d) return JSON.parse(d); } catch(e){}
   return defaultData();
 }
-function saveData() { localStorage.setItem('chamaGithiomi', JSON.stringify(DB)); }
+function saveData() {
+  localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
+  driveSync_save();
+}
 let DB = loadData();
 let currentUser = null;
+
+// ===== GOOGLE DRIVE SYNC =====
+const DRIVE_FILE_NAME = 'githiomi_chama_data.json';
+let driveFileId = localStorage.getItem('chamaGithiomiDriveFileId') || null;
+let driveSyncStatus = 'idle';
+let driveSyncLastSaved = localStorage.getItem('chamaGithiomiDriveLastSaved') || null;
+let driveSaveQueue = null;
+let driveSaveTimer = null;
+
+function driveSetStatus(status, msg) {
+  driveSyncStatus = status;
+  if (driveSyncLastSaved) localStorage.setItem('chamaGithiomiDriveLastSaved', driveSyncLastSaved);
+  const el = document.getElementById('drive-sync-status');
+  if (!el) return;
+  const icons = {idle:'☁️', syncing:'🔄', ok:'✅', error:'❌'};
+  const colors = {idle:'var(--text-muted)', syncing:'var(--gold)', ok:'var(--green-mid)', error:'var(--red)'};
+  const labels = {idle:'Not synced yet', syncing:'Saving to Drive…', ok:'Saved to Drive', error:'Sync failed'};
+  el.innerHTML = `<span style="font-size:22px">${icons[status]}</span>
+    <div>
+      <div style="color:${colors[status]};font-weight:600">${labels[status]}</div>
+      ${msg ? `<div style="color:var(--text-muted);font-size:12px">${msg}</div>` : ''}
+      ${driveSyncLastSaved ? `<div style="color:var(--text-muted);font-size:12px">Last saved: ${new Date(driveSyncLastSaved).toLocaleString()}</div>` : ''}
+    </div>`;
+  const ti = document.getElementById('drive-topbar-indicator');
+  if (ti) { ti.textContent = icons[status]; ti.title = labels[status]; ti.style.opacity = status==='idle'?'0.5':'1'; }
+}
+
+async function driveSync_save() {
+  driveSaveQueue = JSON.stringify(DB);
+  if (driveSaveTimer) clearTimeout(driveSaveTimer);
+  driveSaveTimer = setTimeout(async () => {
+    const payload = driveSaveQueue; driveSaveQueue = null;
+    await driveSync_push(payload);
+  }, 1500);
+}
+
+async function driveSync_push(jsonStr) {
+  driveSetStatus('syncing');
+  try {
+    const prompt = driveFileId
+      ? `Update the Google Drive file with id "${driveFileId}" (filename: "${DRIVE_FILE_NAME}") with this new content. If not found, create a new file. Content:\n${jsonStr}`
+      : `Create a new Google Drive file named "${DRIVE_FILE_NAME}" with mime type application/json (do NOT convert to Google Docs format). Content:\n${jsonStr}`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        model:'claude-sonnet-4-6', max_tokens:512,
+        system:`You manage Google Drive files. After performing the operation, reply ONLY with valid JSON: {"ok":true,"fileId":"<id>"} or {"ok":false,"error":"<msg>"}. No markdown, no extra text.`,
+        messages:[{role:'user',content:prompt}],
+        mcp_servers:[{type:'url',url:'https://drivemcp.googleapis.com/mcp/v1',name:'gdrive'}]
+      })
+    });
+    const data = await resp.json();
+    // Try to find fileId from tool results first
+    let fileId = null;
+    for (const b of (data.content||[])) {
+      if (b.type==='mcp_tool_result') {
+        try { const p=JSON.parse(b.content?.[0]?.text||'{}'); if(p.id){fileId=p.id;break;} } catch(e){}
+      }
+    }
+    // Fallback: parse Claude text
+    if (!fileId) {
+      const txt = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+      try { const p=JSON.parse(txt.replace(/```json|```/g,'').trim()); if(p.fileId)fileId=p.fileId; } catch(e){}
+    }
+    if (fileId) { driveFileId=fileId; localStorage.setItem('chamaGithiomiDriveFileId',fileId); }
+    driveSyncLastSaved = new Date().toISOString();
+    driveSetStatus('ok', driveFileId ? 'Synced \u2714' : '');
+  } catch(err) { driveSetStatus('error', err.message||'Network error'); }
+}
+
+async function driveSync_load() {
+  driveSetStatus('syncing', 'Connecting to Drive\u2026');
+  try {
+    const searchPrompt = driveFileId
+      ? `Download the Google Drive file with id "${driveFileId}". Return ONLY its raw JSON text content, nothing else.`
+      : `Search Google Drive for a file named "${DRIVE_FILE_NAME}". If found, download it and return ONLY its raw JSON content. If not found, return {"found":false}.`;
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        model:'claude-sonnet-4-6', max_tokens:8192,
+        system:`You are a Google Drive assistant. Return ONLY the raw JSON content of the requested file. No markdown, no explanation, no code fences.`,
+        messages:[{role:'user',content:searchPrompt}],
+        mcp_servers:[{type:'url',url:'https://drivemcp.googleapis.com/mcp/v1',name:'gdrive'}]
+      })
+    });
+    const data = await resp.json();
+    let found = null;
+    // Scan tool results for the data
+    for (const b of (data.content||[])) {
+      if (b.type==='mcp_tool_result') {
+        // Could be search results (with files array) or file content
+        const txt = b.content?.[0]?.text || '';
+        try {
+          const p = JSON.parse(txt);
+          if (p.files && p.files.length>0 && !driveFileId) {
+            driveFileId = p.files[0].id;
+            localStorage.setItem('chamaGithiomiDriveFileId', driveFileId);
+          } else if (p.adminPass && Array.isArray(p.mgr)) {
+            found = p;
+          }
+        } catch(e) {}
+      }
+    }
+    // Scan text blocks for data
+    if (!found) {
+      const txt = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
+      try {
+        const p = JSON.parse(txt.replace(/```json|```/g,'').trim());
+        if (p.adminPass && Array.isArray(p.mgr)) found = p;
+      } catch(e) {}
+    }
+    if (found) {
+      DB = found; localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
+      driveSyncLastSaved = new Date().toISOString();
+      driveSetStatus('ok', 'Loaded from Drive');
+      if (document.getElementById('app').style.display !== 'none') renderPage('dashboard');
+    } else {
+      driveSetStatus('idle', driveFileId ? 'Could not load — using local data' : 'No Drive backup found');
+    }
+  } catch(err) { driveSetStatus('error', err.message||'Failed to connect'); }
+}
+
+window.addEventListener('load', () => { setTimeout(driveSync_load, 1000); });
 
 // ╔══════════════════════════════════════════════════════════╗
 // ║  CORE BUSINESS LOGIC                                     ║
