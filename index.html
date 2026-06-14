@@ -590,21 +590,35 @@ async function driveReadFile(fileId) {
 }
 
 async function driveWriteFile(fileId, jsonStr) {
-  const blob = new Blob([jsonStr], {type:'application/json'});
   if (fileId) {
+    // Update existing file — simple media PATCH
     const r = await driveRequest(
       `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
-      {method:'PATCH', body:blob, headers:{'Content-Type':'application/json'}}
+      {method:'PATCH', body: jsonStr, headers:{'Content-Type':'application/json'}}
     );
     const d = await r.json(); return d.id || fileId;
   } else {
-    const meta = JSON.stringify({name: DRIVE_FILE_NAME, mimeType:'application/json'});
-    const form = new FormData();
-    form.append('metadata', new Blob([meta], {type:'application/json'}));
-    form.append('file', blob);
+    // Create new file — Drive requires raw multipart/related (FormData boundary is rejected)
+    const boundary = '-------GitHiomiChama314159';
+    const meta     = JSON.stringify({name: DRIVE_FILE_NAME, mimeType:'application/json'});
+    const body     = [
+      '--' + boundary,
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      meta,
+      '--' + boundary,
+      'Content-Type: application/json',
+      '',
+      jsonStr,
+      '--' + boundary + '--'
+    ].join('\r\n');
     const r = await driveRequest(
-      `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`,
-      {method:'POST', body:form}
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+      {
+        method: 'POST',
+        body,
+        headers: {'Content-Type': 'multipart/related; boundary="' + boundary + '"'}
+      }
     );
     const d = await r.json(); return d.id;
   }
