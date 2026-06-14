@@ -422,72 +422,72 @@ const MEMBERS = [
 ];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
+// ╔══════════════════════════════════════════════════════════╗
+// ║  GOOGLE DRIVE — PRIMARY DATA STORE                       ║
+// ║                                                          ║
+// ║  Drive is the source of truth.  localStorage is used     ║
+// ║  ONLY to cache the OAuth Client ID and the Drive file    ║
+// ║  ID across page reloads — never for chama data.          ║
+// ║                                                          ║
+// ║  Boot flow:                                              ║
+// ║   1. Show auth screen with a "loading" overlay           ║
+// ║   2. If signed in → load DB from Drive → hide overlay    ║
+// ║   3. If not signed in → DB = defaultData() so the app    ║
+// ║      can at least render the login form                  ║
+// ║  Every saveData() call writes to Drive only.             ║
+// ╚══════════════════════════════════════════════════════════╝
+
+const DRIVE_CLIENT_ID = localStorage.getItem('chamaGithiomiClientId') || '';
+const DRIVE_SCOPE     = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FILE_NAME = 'githiomi_chama_data.json';
+
+let driveToken      = null;
+let driveFileId     = localStorage.getItem('chamaGithiomiDriveFileId') || null;
+let driveSyncStatus = 'idle';
+let driveSyncLastSaved = null;   // never persisted — Drive IS the store
+let driveSaveQueue  = null;
+let driveSaveTimer  = null;
+
+// ── Default / migration helpers ─────────────────────────────────────────────
 function defaultData() {
-  // adminPass stores a SHA-256 hex digest, never a plain-text password.
-  // Default password hash = SHA-256("W0rd65!5!")
   return { adminPass:"3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431", memberPins:{}, mgr:[], savings:[], loans:[], repayments:[] };
 }
-function loadData() {
-  const DEFAULT_HASH = "3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431"; // SHA-256("W0rd65!5!")
-  try {
-    const d = localStorage.getItem('chamaGithiomi');
-    if (d) {
-      const parsed = JSON.parse(d);
-      // Migration: if adminPass is not a 64-char hex SHA-256 digest, it is a
-      // legacy plain-text password — replace it with the hashed default.
-      const isHashed = typeof parsed.adminPass === 'string' && /^[0-9a-f]{64}$/.test(parsed.adminPass);
-      if (!isHashed) {
-        parsed.adminPass = DEFAULT_HASH;
-        localStorage.setItem('chamaGithiomi', JSON.stringify(parsed));
-      }
-      // Migration: clear any plain-text 4-digit PINs (can't hash without knowing the originals).
-      let pinsCleared = false;
-      for (const key in parsed.memberPins) {
-        if (/^\d{1,10}$/.test(parsed.memberPins[key]) && parsed.memberPins[key].length < 64) {
-          delete parsed.memberPins[key];
-          pinsCleared = true;
-        }
-      }
-      if (pinsCleared) {
-        localStorage.setItem('chamaGithiomi', JSON.stringify(parsed));
-        setTimeout(() => alert('Security upgrade: member PINs were stored as plain text and have been cleared. Please ask the admin to reset each member\'s PIN from the Members page.'), 1500);
-      }
-      return parsed;
+
+function migrateData(parsed) {
+  const DEFAULT_HASH = "3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431";
+  // Upgrade plain-text adminPass → hashed default
+  const isHashed = typeof parsed.adminPass === 'string' && /^[0-9a-f]{64}$/.test(parsed.adminPass);
+  if (!isHashed) parsed.adminPass = DEFAULT_HASH;
+  // Clear plain-text PINs
+  let pinsCleared = false;
+  for (const key in parsed.memberPins) {
+    if (/^\d{1,10}$/.test(parsed.memberPins[key]) && parsed.memberPins[key].length < 64) {
+      delete parsed.memberPins[key]; pinsCleared = true;
     }
-  } catch(e) {}
-  return defaultData();
+  }
+  if (pinsCleared) {
+    setTimeout(() => alert('Security upgrade: member PINs were stored as plain text and have been cleared. Please ask the admin to reset each member\'s PIN from the Members page.'), 1500);
+  }
+  return parsed;
 }
-function saveData() {
-  localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
-  driveSync_save();
-}
-let DB = loadData();
+
+// DB starts as default; overwritten from Drive once signed in
+let DB = defaultData();
 let currentUser = null;
 
-// ===== GOOGLE DRIVE SYNC (OAuth2 + Drive REST API) =====
-// HOW TO SET UP (one-time):
-//  1. Go to https://console.cloud.google.com/
-//  2. Create a project → Enable "Google Drive API"
-//  3. OAuth consent screen → External → add your Gmail as test user
-//  4. Credentials → Create OAuth client ID → Web application
-//     Authorised JavaScript origins: add  http://localhost  AND  null  (for file://)
-//  5. Paste your Client ID into DRIVE_CLIENT_ID below and save the file.
-
-const DRIVE_CLIENT_ID   = localStorage.getItem('chamaGithiomiClientId') || '';
-const DRIVE_SCOPE       = 'https://www.googleapis.com/auth/drive.file';
-const DRIVE_FILE_NAME   = 'githiomi_chama_data.json';
-
-let driveToken        = null;   // current access token
-let driveFileId       = localStorage.getItem('chamaGithiomiDriveFileId') || null;
-let driveSyncStatus   = 'idle';
-let driveSyncLastSaved= localStorage.getItem('chamaGithiomiDriveLastSaved') || null;
-let driveSaveQueue    = null;
-let driveSaveTimer    = null;
+// ── saveData — Drive only ───────────────────────────────────────────────────
+function saveData() {
+  if (!driveToken) {
+    // Not signed in: queue the save; it will fire once driveInit completes
+    driveSaveQueue = JSON.stringify(DB);
+    return;
+  }
+  driveSync_save();
+}
 
 // ── UI helpers ──────────────────────────────────────────────────────────────
 function driveSetStatus(status, msg) {
   driveSyncStatus = status;
-  if (driveSyncLastSaved) localStorage.setItem('chamaGithiomiDriveLastSaved', driveSyncLastSaved);
   const el = document.getElementById('drive-sync-status');
   if (!el) return;
   const icons  = {idle:'☁️', syncing:'🔄', ok:'✅', error:'❌', setup:'⚙️'};
@@ -501,6 +501,23 @@ function driveSetStatus(status, msg) {
     </div>`;
   const ti = document.getElementById('drive-topbar-indicator');
   if (ti) { ti.textContent = icons[status]||'☁️'; ti.title = labels[status]||status; ti.style.opacity = (status==='idle'||status==='setup') ? '0.5':'1'; }
+}
+
+// ── Boot-time loading overlay on the auth screen ───────────────────────────
+function showDriveLoadingOverlay(msg) {
+  let ov = document.getElementById('drive-boot-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'drive-boot-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(26,58,42,.82);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:white;font-family:Inter,sans-serif;';
+    ov.innerHTML = '<div style="font-size:36px">☁️</div><div id="drive-boot-msg" style="font-size:15px;font-weight:500;opacity:.9"></div>';
+    document.body.appendChild(ov);
+  }
+  document.getElementById('drive-boot-msg').textContent = msg || 'Loading from Google Drive…';
+}
+function hideDriveLoadingOverlay() {
+  const ov = document.getElementById('drive-boot-overlay');
+  if (ov) ov.remove();
 }
 
 // ── Client-ID setup prompt ──────────────────────────────────────────────────
@@ -540,7 +557,6 @@ function driveHandleOAuthCallback() {
   if (!token) return false;
   driveToken = token;
   sessionStorage.setItem('chamaGithiomiDriveToken', token);
-  // Clean the URL
   history.replaceState(null, '', window.location.pathname);
   return true;
 }
@@ -562,9 +578,9 @@ async function driveRequest(url, options={}) {
 }
 
 async function driveFindFile() {
-  const q   = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
-  const r   = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=5`);
-  const d   = await r.json();
+  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+  const r = await driveRequest(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=5`);
+  const d = await r.json();
   return (d.files && d.files.length) ? d.files[0].id : null;
 }
 
@@ -574,29 +590,29 @@ async function driveReadFile(fileId) {
 }
 
 async function driveWriteFile(fileId, jsonStr) {
-  const blob    = new Blob([jsonStr], {type:'application/json'});
-  const method  = fileId ? 'PATCH' : 'POST';
-  const url     = fileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`
-    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
-
+  const blob = new Blob([jsonStr], {type:'application/json'});
   if (fileId) {
-    const r = await driveRequest(url, {method, body: blob, headers:{'Content-Type':'application/json'}});
+    const r = await driveRequest(
+      `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+      {method:'PATCH', body:blob, headers:{'Content-Type':'application/json'}}
+    );
     const d = await r.json(); return d.id || fileId;
   } else {
-    // Multipart: metadata + content
     const meta = JSON.stringify({name: DRIVE_FILE_NAME, mimeType:'application/json'});
-    const form  = new FormData();
+    const form = new FormData();
     form.append('metadata', new Blob([meta], {type:'application/json'}));
-    form.append('file',     blob);
-    const r = await driveRequest(url, {method:'POST', body: form});
+    form.append('file', blob);
+    const r = await driveRequest(
+      `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`,
+      {method:'POST', body:form}
+    );
     const d = await r.json(); return d.id;
   }
 }
 
-// ── Public sync functions ───────────────────────────────────────────────────
+// ── Save helpers ────────────────────────────────────────────────────────────
 async function driveSync_save() {
-  if (!driveToken) return;   // not signed in — silently skip
+  if (!driveToken) return;
   driveSaveQueue = JSON.stringify(DB);
   if (driveSaveTimer) clearTimeout(driveSaveTimer);
   driveSaveTimer = setTimeout(async () => {
@@ -609,8 +625,6 @@ async function driveSync_push(jsonStr) {
   if (!driveToken) { driveSignIn(); return; }
   driveSetStatus('syncing');
   try {
-    // Always search by filename to find an existing file before writing,
-    // so we update in-place rather than creating duplicates.
     if (!driveFileId) {
       driveFileId = await driveFindFile();
       if (driveFileId) localStorage.setItem('chamaGithiomiDriveFileId', driveFileId);
@@ -625,6 +639,7 @@ async function driveSync_push(jsonStr) {
   }
 }
 
+// ── Load from Drive (manual "Load from Drive" button) ──────────────────────
 async function driveSync_load() {
   if (!driveToken) {
     if (!DRIVE_CLIENT_ID) driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
@@ -633,21 +648,13 @@ async function driveSync_load() {
   }
   driveSetStatus('syncing', 'Connecting to Drive…');
   try {
-    // Always search by filename first — the cached fileId may be stale (different
-    // session, browser, or device) and drive.file scope won't find it by ID alone.
     const foundId = await driveFindFile();
-    if (foundId) {
-      driveFileId = foundId;
-      localStorage.setItem('chamaGithiomiDriveFileId', foundId);
-    } else if (!driveFileId) {
-      driveSetStatus('idle', 'No backup found on Drive yet');
-      return;
-    }
+    if (foundId) { driveFileId = foundId; localStorage.setItem('chamaGithiomiDriveFileId', foundId); }
+    if (!driveFileId) { driveSetStatus('idle', 'No backup found on Drive yet'); return; }
     const txt = await driveReadFile(driveFileId);
     const parsed = JSON.parse(txt);
     if (parsed.adminPass && Array.isArray(parsed.mgr)) {
-      DB = parsed;
-      localStorage.setItem('chamaGithiomi', JSON.stringify(DB));
+      DB = migrateData(parsed);
       driveSyncLastSaved = new Date().toISOString();
       driveSetStatus('ok', 'Loaded from Drive');
       if (document.getElementById('app') && document.getElementById('app').style.display !== 'none') renderPage('dashboard');
@@ -658,14 +665,62 @@ async function driveSync_load() {
   }
 }
 
-window.addEventListener('load', () => {
+// ── Boot: load DB from Drive before showing the app ─────────────────────────
+async function driveInit() {
   const gotToken = driveHandleOAuthCallback() || driveRestoreToken();
-  if (!gotToken && !DRIVE_CLIENT_ID) {
-    driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
-    return;
+
+  if (!gotToken) {
+    // No token — show login screen with a "Sign in to Drive" prompt overlay
+    if (!DRIVE_CLIENT_ID) {
+      driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
+    } else {
+      showDriveLoadingOverlay('Sign in to Google to load your data');
+      // Replace overlay content with a sign-in button
+      const ov = document.getElementById('drive-boot-overlay');
+      if (ov) {
+        ov.innerHTML = `
+          <div style="font-size:40px">☁️</div>
+          <div style="font-size:16px;font-weight:600">Sign in to load your chama data</div>
+          <div style="font-size:13px;opacity:.75;max-width:280px;text-align:center">Your data is stored in Google Drive. Sign in to access it.</div>
+          <button onclick="driveSignIn()" style="margin-top:8px;padding:11px 28px;background:#e9a825;color:#1a3a2a;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;">🔑 Sign In to Google</button>
+          <div style="font-size:12px;opacity:.55;margin-top:6px">Or <a href="#" onclick="hideDriveLoadingOverlay()" style="color:#52b788">continue without Drive</a> (data won't be saved)</div>`;
+      }
+    }
+    return; // DB stays as defaultData()
   }
-  setTimeout(driveSync_load, 800);
-});
+
+  // We have a token — fetch data from Drive before anything else
+  showDriveLoadingOverlay('Loading your data from Google Drive…');
+  driveSetStatus('syncing', 'Loading…');
+  try {
+    const foundId = await driveFindFile();
+    if (foundId) { driveFileId = foundId; localStorage.setItem('chamaGithiomiDriveFileId', foundId); }
+    if (driveFileId) {
+      const txt = await driveReadFile(driveFileId);
+      const parsed = JSON.parse(txt);
+      if (parsed.adminPass && Array.isArray(parsed.mgr)) {
+        DB = migrateData(parsed);
+        driveSyncLastSaved = new Date().toISOString();
+        driveSetStatus('ok', '');
+      }
+    } else {
+      // No file yet — first run. DB stays as defaultData(); first save will create it.
+      driveSetStatus('ok', 'New file will be created on first save');
+    }
+    // Flush any save that was queued before token was available
+    if (driveSaveQueue) { const q = driveSaveQueue; driveSaveQueue = null; await driveSync_push(q); }
+  } catch(err) {
+    if (err.message === 'auth') {
+      driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Session expired — sign in again</a>');
+    } else {
+      driveSetStatus('error', err.message || 'Failed to load from Drive');
+    }
+  } finally {
+    hideDriveLoadingOverlay();
+  }
+}
+
+window.addEventListener('load', () => driveInit());
 
 // ╔══════════════════════════════════════════════════════════╗
 // ║  CORE BUSINESS LOGIC                                     ║
@@ -1443,7 +1498,7 @@ function exportCSV(type) {
   download(csv,filename,'text/csv');
 }
 function exportJSON(){download(JSON.stringify(DB,null,2),'chama_backup.json','application/json');}
-function importJSON(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(!d.adminPass||!Array.isArray(d.mgr)){alert('Invalid backup file.');return;}if(!confirm('This will replace all current data. Continue?'))return;DB=d;saveData();alert('Data restored!');renderPage('dashboard');}catch(err){alert('Failed to parse JSON.');}};r.readAsText(f);}
+function importJSON(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(!d.adminPass||!Array.isArray(d.mgr)){alert('Invalid backup file.');return;}if(!confirm('This will replace all current data. Continue?'))return;DB=migrateData(d);saveData();alert('Data restored and saved to Google Drive!');renderPage('dashboard');}catch(err){alert('Failed to parse JSON.');}};r.readAsText(f);}
 function download(content,filename,type){const b=new Blob([content],{type});const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download=filename;a.click();URL.revokeObjectURL(u);}
 
 // ╔══════════════════════════════════════════════════════════╗
