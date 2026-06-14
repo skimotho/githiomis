@@ -609,7 +609,12 @@ async function driveSync_push(jsonStr) {
   if (!driveToken) { driveSignIn(); return; }
   driveSetStatus('syncing');
   try {
-    if (!driveFileId) driveFileId = await driveFindFile();
+    // Always search by filename to find an existing file before writing,
+    // so we update in-place rather than creating duplicates.
+    if (!driveFileId) {
+      driveFileId = await driveFindFile();
+      if (driveFileId) localStorage.setItem('chamaGithiomiDriveFileId', driveFileId);
+    }
     const newId = await driveWriteFile(driveFileId, jsonStr);
     if (newId) { driveFileId = newId; localStorage.setItem('chamaGithiomiDriveFileId', newId); }
     driveSyncLastSaved = new Date().toISOString();
@@ -628,8 +633,16 @@ async function driveSync_load() {
   }
   driveSetStatus('syncing', 'Connecting to Drive…');
   try {
-    if (!driveFileId) driveFileId = await driveFindFile();
-    if (!driveFileId) { driveSetStatus('idle', 'No backup found on Drive yet'); return; }
+    // Always search by filename first — the cached fileId may be stale (different
+    // session, browser, or device) and drive.file scope won't find it by ID alone.
+    const foundId = await driveFindFile();
+    if (foundId) {
+      driveFileId = foundId;
+      localStorage.setItem('chamaGithiomiDriveFileId', foundId);
+    } else if (!driveFileId) {
+      driveSetStatus('idle', 'No backup found on Drive yet');
+      return;
+    }
     const txt = await driveReadFile(driveFileId);
     const parsed = JSON.parse(txt);
     if (parsed.adminPass && Array.isArray(parsed.mgr)) {
