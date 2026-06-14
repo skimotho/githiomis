@@ -730,6 +730,18 @@ async function driveInit() {
       driveSetStatus('error', err.message || 'Failed to load from Drive');
     }
   } finally {
+    // Restore session: if the user was logged in before the OAuth redirect, bring them back
+    const savedUser = sessionStorage.getItem('chamaCurrentUser');
+    if (savedUser) {
+      try {
+        currentUser = JSON.parse(savedUser);
+        hideDriveLoadingOverlay();
+        showApp();
+        return;
+      } catch(e) {
+        sessionStorage.removeItem('chamaCurrentUser');
+      }
+    }
     hideDriveLoadingOverlay();
   }
 }
@@ -885,7 +897,7 @@ async function doAdminLogin() {
   const input = document.getElementById('admin-pass').value;
   const hashed = await hashPassword(input);
   if (hashed === DB.adminPass) {
-    currentUser = {role:'admin'}; showApp();
+    currentUser = {role:'admin'}; sessionStorage.setItem('chamaCurrentUser', JSON.stringify(currentUser)); showApp();
   } else {
     showAuthError('Incorrect password. Try again.');
   }
@@ -897,7 +909,7 @@ async function doMemberLogin() {
   const stored = DB.memberPins[idx];
   if (!stored)  { showAuthError('PIN not set. Please ask the admin to set your PIN.'); return; }
   const hashed = await hashPassword(pin);
-  if (hashed === stored) { currentUser={role:'member',idx}; showApp(); }
+  if (hashed === stored) { currentUser={role:'member',idx}; sessionStorage.setItem('chamaCurrentUser', JSON.stringify(currentUser)); showApp(); }
   else showAuthError('Incorrect PIN. Please try again.');
 }
 
@@ -908,6 +920,7 @@ function showAuthError(msg) {
 
 function logout() {
   currentUser = null;
+  sessionStorage.removeItem('chamaCurrentUser');
   document.getElementById('app').style.display='none';
   document.getElementById('auth-screen').style.display='flex';
   document.getElementById('admin-pass').value='';
