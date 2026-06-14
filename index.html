@@ -639,10 +639,10 @@ async function driveSync_push(jsonStr) {
   if (!driveToken) { driveSignIn(); return; }
   driveSetStatus('syncing');
   try {
-    if (!driveFileId) {
-      driveFileId = await driveFindFile();
-      if (driveFileId) localStorage.setItem('chamaGithiomiDriveFileId', driveFileId);
-    }
+    // Always search by filename to avoid using a stale fileId from a previous session
+    const foundId = await driveFindFile();
+    if (foundId) { driveFileId = foundId; localStorage.setItem('chamaGithiomiDriveFileId', foundId); }
+    if (!driveFileId) { driveFileId = null; } // no existing file — driveWriteFile will create one
     const newId = await driveWriteFile(driveFileId, jsonStr);
     if (newId) { driveFileId = newId; localStorage.setItem('chamaGithiomiDriveFileId', newId); }
     driveSyncLastSaved = new Date().toISOString();
@@ -655,17 +655,21 @@ async function driveSync_push(jsonStr) {
 
 // ── Load from Drive (manual "Load from Drive" button) ──────────────────────
 async function driveSync_load() {
+  // If not signed in, trigger OAuth immediately — don't silently do nothing
   if (!driveToken) {
-    if (!DRIVE_CLIENT_ID) driveSetStatus('setup', '<a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Enter Client ID to enable sync</a>');
-    else driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Sign in to Google Drive</a>');
+    if (!DRIVE_CLIENT_ID) { drivePromptClientId(); return; }
+    // Store intent so after redirect we auto-load
+    sessionStorage.setItem('chamaGithiomiDriveAutoLoad', '1');
+    driveSignIn();
     return;
   }
   driveSetStatus('syncing', 'Connecting to Drive…');
   try {
+    // Always search by filename — never rely solely on cached fileId
     const foundId = await driveFindFile();
     if (foundId) { driveFileId = foundId; localStorage.setItem('chamaGithiomiDriveFileId', foundId); }
     if (!driveFileId) { driveSetStatus('idle', 'No backup found on Drive yet'); return; }
-    const txt = await driveReadFile(driveFileId);
+    const txt    = await driveReadFile(driveFileId);
     const parsed = JSON.parse(txt);
     if (parsed.adminPass && Array.isArray(parsed.mgr)) {
       DB = migrateData(parsed);
@@ -674,8 +678,12 @@ async function driveSync_load() {
       if (document.getElementById('app') && document.getElementById('app').style.display !== 'none') renderPage('dashboard');
     } else { driveSetStatus('idle', 'File found but data looks invalid'); }
   } catch(err) {
-    if (err.message === 'auth') driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Sign in to Google Drive</a>');
-    else driveSetStatus('error', err.message || 'Load failed');
+    if (err.message === 'auth') {
+      sessionStorage.setItem('chamaGithiomiDriveAutoLoad', '1');
+      driveSignIn();
+    } else {
+      driveSetStatus('error', err.message || 'Load failed');
+    }
   }
 }
 
@@ -723,6 +731,8 @@ async function driveInit() {
     }
     // Flush any save that was queued before token was available
     if (driveSaveQueue) { const q = driveSaveQueue; driveSaveQueue = null; await driveSync_push(q); }
+    // If user clicked "Load from Drive" before signing in, honour that intent now
+    sessionStorage.removeItem('chamaGithiomiDriveAutoLoad');
   } catch(err) {
     if (err.message === 'auth') {
       driveSetStatus('idle', '<a href="#" onclick="driveSignIn()" style="color:var(--green-mid)">Session expired — sign in again</a>');
