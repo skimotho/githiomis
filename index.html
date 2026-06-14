@@ -428,7 +428,33 @@ function defaultData() {
   return { adminPass:"3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431", memberPins:{}, mgr:[], savings:[], loans:[], repayments:[] };
 }
 function loadData() {
-  try { const d=localStorage.getItem('chamaGithiomi'); if(d) return JSON.parse(d); } catch(e){}
+  const DEFAULT_HASH = "3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431"; // SHA-256("W0rd65!5!")
+  try {
+    const d = localStorage.getItem('chamaGithiomi');
+    if (d) {
+      const parsed = JSON.parse(d);
+      // Migration: if adminPass is not a 64-char hex SHA-256 digest, it is a
+      // legacy plain-text password — replace it with the hashed default.
+      const isHashed = typeof parsed.adminPass === 'string' && /^[0-9a-f]{64}$/.test(parsed.adminPass);
+      if (!isHashed) {
+        parsed.adminPass = DEFAULT_HASH;
+        localStorage.setItem('chamaGithiomi', JSON.stringify(parsed));
+      }
+      // Migration: clear any plain-text 4-digit PINs (can't hash without knowing the originals).
+      let pinsCleared = false;
+      for (const key in parsed.memberPins) {
+        if (/^\d{1,10}$/.test(parsed.memberPins[key]) && parsed.memberPins[key].length < 64) {
+          delete parsed.memberPins[key];
+          pinsCleared = true;
+        }
+      }
+      if (pinsCleared) {
+        localStorage.setItem('chamaGithiomi', JSON.stringify(parsed));
+        setTimeout(() => alert('Security upgrade: member PINs were stored as plain text and have been cleared. Please ask the admin to reset each member\'s PIN from the Members page.'), 1500);
+      }
+      return parsed;
+    }
+  } catch(e) {}
   return defaultData();
 }
 function saveData() {
