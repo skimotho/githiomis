@@ -147,8 +147,6 @@
       <button class="btn btn-primary btn-full" onclick="doMemberLogin()">Sign In</button>
     </div>
     <div class="auth-error" id="auth-error"></div>
-    <hr class="divider" style="margin-top:24px">
-    <div style="font-size:11px;color:var(--text-muted)">Default admin password: <strong>chama2024</strong></div>
   </div>
 </div>
 
@@ -425,7 +423,9 @@ const MEMBERS = [
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 function defaultData() {
-  return { adminPass:"chama2024", memberPins:{}, mgr:[], savings:[], loans:[], repayments:[] };
+  // adminPass stores a SHA-256 hex digest, never a plain-text password.
+  // Default password hash = SHA-256("W0rd65!5!")
+  return { adminPass:"3eed91c3a1388da70de246c9ae22c1c339c48104043395123951a81ae7f17431", memberPins:{}, mgr:[], savings:[], loans:[], repayments:[] };
 }
 function loadData() {
   try { const d=localStorage.getItem('chamaGithiomi'); if(d) return JSON.parse(d); } catch(e){}
@@ -746,6 +746,16 @@ function recalculateFromDate(changedDate) {
 }
 
 // ╔══════════════════════════════════════════════════════════╗
+// ║  CRYPTO HELPERS                                          ║
+// ╚══════════════════════════════════════════════════════════╝
+async function hashPassword(pass) {
+  const encoded = new TextEncoder().encode(pass);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ╔══════════════════════════════════════════════════════════╗
 // ║  AUTH                                                    ║
 // ╚══════════════════════════════════════════════════════════╝
 let authRole = 'admin';
@@ -763,20 +773,23 @@ function populateMemberSelect() {
     MEMBERS.map((m,i)=>`<option value="${i}">${m}</option>`).join('');
 }
 
-function doAdminLogin() {
-  if (document.getElementById('admin-pass').value === DB.adminPass) {
+async function doAdminLogin() {
+  const input = document.getElementById('admin-pass').value;
+  const hashed = await hashPassword(input);
+  if (hashed === DB.adminPass) {
     currentUser = {role:'admin'}; showApp();
   } else {
     showAuthError('Incorrect password. Try again.');
   }
 }
 
-function doMemberLogin() {
+async function doMemberLogin() {
   const idx = parseInt(document.getElementById('member-select').value);
   const pin = document.getElementById('member-pin').value;
   const stored = DB.memberPins[idx];
   if (!stored)  { showAuthError('PIN not set. Please ask the admin to set your PIN.'); return; }
-  if (pin===stored) { currentUser={role:'member',idx}; showApp(); }
+  const hashed = await hashPassword(pin);
+  if (hashed === stored) { currentUser={role:'member',idx}; showApp(); }
   else showAuthError('Incorrect PIN. Please try again.');
 }
 
@@ -1324,8 +1337,8 @@ function renderMembers() {
 
 let pinTargetIdx=null;
 function openPinModal(idx){pinTargetIdx=idx;document.getElementById('pin-modal-name').textContent=`Member: ${MEMBERS[idx]}`;document.getElementById('pin-input').value='';openModal('modal-pin');}
-function saveMemberPin(){const pin=document.getElementById('pin-input').value.trim();if(!/^\d{4}$/.test(pin)){alert('PIN must be exactly 4 digits.');return;}DB.memberPins[pinTargetIdx]=pin;saveData();closeModal('modal-pin');renderPage('members');}
-function changeAdminPass(){const np=document.getElementById('new-admin-pass').value.trim();if(!np||np.length<4){alert('Password must be at least 4 characters.');return;}DB.adminPass=np;saveData();alert('Admin password updated.');document.getElementById('new-admin-pass').value='';}
+async function saveMemberPin(){const pin=document.getElementById('pin-input').value.trim();if(!/^\d{4}$/.test(pin)){alert('PIN must be exactly 4 digits.');return;}DB.memberPins[pinTargetIdx]=await hashPassword(pin);saveData();closeModal('modal-pin');renderPage('members');}
+async function changeAdminPass(){const np=document.getElementById('new-admin-pass').value.trim();if(!np||np.length<4){alert('Password must be at least 4 characters.');return;}DB.adminPass=await hashPassword(np);saveData();alert('Admin password updated.');document.getElementById('new-admin-pass').value='';}
 
 // ╔══════════════════════════════════════════════════════════╗
 // ║  MEMBER PORTAL                                           ║
