@@ -552,18 +552,26 @@ function driveSignIn() {
 function driveHandleOAuthCallback() {
   const hash = window.location.hash;
   if (!hash.includes('access_token')) return false;
-  const params = new URLSearchParams(hash.slice(1));
-  const token  = params.get('access_token');
+  const params  = new URLSearchParams(hash.slice(1));
+  const token   = params.get('access_token');
+  const expiresIn = parseInt(params.get('expires_in') || '3600', 10);
   if (!token) return false;
   driveToken = token;
-  sessionStorage.setItem('chamaGithiomiDriveToken', token);
+  // Store in localStorage with expiry so it survives OAuth redirects across all browsers
+  const expiry = Date.now() + (expiresIn - 60) * 1000; // 1-min safety buffer
+  localStorage.setItem('chamaGithiomiDriveToken', token);
+  localStorage.setItem('chamaGithiomiDriveTokenExpiry', String(expiry));
   history.replaceState(null, '', window.location.pathname);
   return true;
 }
 
 function driveRestoreToken() {
-  const t = sessionStorage.getItem('chamaGithiomiDriveToken');
-  if (t) { driveToken = t; return true; }
+  const token  = localStorage.getItem('chamaGithiomiDriveToken');
+  const expiry = parseInt(localStorage.getItem('chamaGithiomiDriveTokenExpiry') || '0', 10);
+  if (token && Date.now() < expiry) { driveToken = token; return true; }
+  // Token missing or expired — clear it
+  localStorage.removeItem('chamaGithiomiDriveToken');
+  localStorage.removeItem('chamaGithiomiDriveTokenExpiry');
   return false;
 }
 
@@ -573,7 +581,7 @@ async function driveRequest(url, options={}) {
     ...options,
     headers: { 'Authorization': 'Bearer ' + driveToken, ...(options.headers||{}) }
   });
-  if (resp.status === 401) { driveToken = null; sessionStorage.removeItem('chamaGithiomiDriveToken'); throw new Error('auth'); }
+  if (resp.status === 401) { driveToken = null; localStorage.removeItem('chamaGithiomiDriveToken'); localStorage.removeItem('chamaGithiomiDriveTokenExpiry'); throw new Error('auth'); }
   return resp;
 }
 
