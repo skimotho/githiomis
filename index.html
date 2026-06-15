@@ -279,7 +279,6 @@
             <button class="btn btn-primary" onclick="driveSync_push(JSON.stringify(DB))">☁️ Save to Drive Now</button>
           </div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:10px">Need a Client ID? <a href="#" onclick="drivePromptClientId()" style="color:var(--green-mid)">Set it up here</a></div>
-          </div>
         </div>
       </div>
     </div>
@@ -1105,7 +1104,7 @@ function renderMgr() {
   if (!DB.mgr.length) { tbody.innerHTML='<tr><td colspan="8" class="center muted">No MGR records yet</td></tr>'; return; }
   tbody.innerHTML = [...DB.mgr].reverse().map(m=>{
     const total=m.contributorIdxs.length*1000;
-    const takenHome=total-m.reinvestAmount;
+    const takenHome=total-(m.reinvestAmount||0);
     return `<tr${m.reinvestAmount>0?' class="reinvest-row"':''}>
       <td>${MONTHS[m.month-1]} ${m.year}</td>
       <td>${fmtDate(m.date)}</td>
@@ -1241,7 +1240,7 @@ function openLoanModal() {
   document.getElementById('loan-date').value = new Date().toISOString().split('T')[0];
   document.getElementById('loan-borrower').innerHTML = MEMBERS.map((m,i)=>`<option value="${i}">${m}</option>`).join('');
   document.getElementById('loan-amount').value='';
-  document.getElementById('loan-shares-preview').style.display='none';
+  document.getElementById('loan-shares-table').style.display='none';
   updateLoanPreview();
   openModal('modal-loan');
 }
