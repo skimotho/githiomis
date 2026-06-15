@@ -603,6 +603,13 @@ async function driveWriteFile(fileId, jsonStr) {
       `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
       {method:'PATCH', body: jsonStr, headers:{'Content-Type':'application/json'}}
     );
+    // 404 = cached fileId was deleted from Drive — clear it and create a new file instead
+    if (r.status === 404) {
+      driveFileId = null;
+      localStorage.removeItem('chamaGithiomiDriveFileId');
+      return driveWriteFile(null, jsonStr);
+    }
+    if (!r.ok) { const t = await r.text(); throw new Error(`Drive write failed (${r.status}): ${t}`); }
     const d = await r.json(); return d.id || fileId;
   } else {
     // Create new file — Drive requires raw multipart/related (FormData boundary is rejected)
@@ -617,7 +624,8 @@ async function driveWriteFile(fileId, jsonStr) {
       'Content-Type: application/json',
       '',
       jsonStr,
-      '--' + boundary + '--'
+      '--' + boundary + '--',
+      ''
     ].join('\r\n');
     const r = await driveRequest(
       'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
@@ -627,6 +635,7 @@ async function driveWriteFile(fileId, jsonStr) {
         headers: {'Content-Type': 'multipart/related; boundary="' + boundary + '"'}
       }
     );
+    if (!r.ok) { const t = await r.text(); throw new Error(`Drive create failed (${r.status}): ${t}`); }
     const d = await r.json(); return d.id;
   }
 }
@@ -646,10 +655,16 @@ async function driveSync_push(jsonStr) {
   if (!driveToken) { driveSignIn(); return; }
   driveSetStatus('syncing');
   try {
-    // Always search by filename to avoid using a stale fileId from a previous session
+    // Always search by filename first — avoids using a stale fileId from a previous session
     const foundId = await driveFindFile();
-    if (foundId) { driveFileId = foundId; localStorage.setItem('chamaGithiomiDriveFileId', foundId); }
-    if (!driveFileId) { driveFileId = null; } // no existing file — driveWriteFile will create one
+    if (foundId) {
+      driveFileId = foundId;
+      localStorage.setItem('chamaGithiomiDriveFileId', foundId);
+    } else {
+      // File not found on Drive — clear any stale cached ID so driveWriteFile creates a new one
+      driveFileId = null;
+      localStorage.removeItem('chamaGithiomiDriveFileId');
+    }
     const newId = await driveWriteFile(driveFileId, jsonStr);
     if (newId) { driveFileId = newId; localStorage.setItem('chamaGithiomiDriveFileId', newId); }
     driveSyncLastSaved = new Date().toISOString();
@@ -659,6 +674,7 @@ async function driveSync_push(jsonStr) {
     else driveSetStatus('error', err.message || 'Save failed');
   }
 }
+
 
 // ── Load from Drive (manual "Load from Drive" button) ──────────────────────
 async function driveSync_load() {
