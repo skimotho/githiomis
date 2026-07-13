@@ -1026,7 +1026,7 @@ function renderPage(id) {
 // ╔══════════════════════════════════════════════════════════╗
 // ║  HELPERS                                                 ║
 // ╚══════════════════════════════════════════════════════════╝
-function fmtKes(n) { return 'Ksh '+Number(n).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtKes(n) { return Number(n).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtDate(d) { if(!d) return '-'; const p=d.split('-'); return `${p[2]}/${p[1]}/${p[0]}`; }
 function populateMonthYear(mId,yId) {
   const now=new Date();
