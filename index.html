@@ -226,6 +226,31 @@
       </div></div>
     </div>
 
+    <!-- MONTHLY TOTALS -->
+    <div class="page" id="page-monthly-totals">
+      <div class="section-header">
+        <div><div class="section-title">Monthly Totals</div><div class="section-sub">Savings, MGR & repayments broken down by month</div></div>
+      </div>
+      <div class="card"><div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th rowspan="2" style="vertical-align:bottom">Month</th>
+              <th colspan="4" style="text-align:center;border-left:2px solid var(--white)">Savings</th>
+              <th colspan="3" style="text-align:center;border-left:2px solid var(--white)">MGR</th>
+              <th colspan="3" style="text-align:center;border-left:2px solid var(--white)">Repayments</th>
+            </tr>
+            <tr>
+              <th style="border-left:2px solid var(--white)">Regular</th><th>Interest</th><th>MGR Reinvest</th><th>Total</th>
+              <th style="border-left:2px solid var(--white)">Collected</th><th>Reinvested</th><th>Taken Home</th>
+              <th style="border-left:2px solid var(--white)">Principal</th><th>Interest</th><th>Total</th>
+            </tr>
+          </thead>
+          <tbody id="monthly-totals-tbody"></tbody>
+        </table>
+      </div></div>
+    </div>
+
     <!-- MEMBERS -->
     <div class="page" id="page-members">
       <div class="section-header"><div><div class="section-title">Members</div></div></div>
@@ -974,7 +999,7 @@ function showApp() {
 // ╔══════════════════════════════════════════════════════════╗
 // ║  NAVIGATION                                              ║
 // ╚══════════════════════════════════════════════════════════╝
-const ADMIN_TABS  = [{id:'dashboard',label:'Dashboard'},{id:'mgr',label:'MGR'},{id:'savings',label:'Savings'},{id:'loans',label:'Loans'},{id:'repayments',label:'Repayments'},{id:'members',label:'Members'},{id:'reports',label:'Reports'}];
+const ADMIN_TABS  = [{id:'dashboard',label:'Dashboard'},{id:'mgr',label:'MGR'},{id:'savings',label:'Savings'},{id:'loans',label:'Loans'},{id:'repayments',label:'Repayments'},{id:'monthly-totals',label:'Monthly Totals'},{id:'members',label:'Members'},{id:'reports',label:'Reports'}];
 const MEMBER_TABS = [{id:'member-portal',label:'My Summary'}];
 
 function buildNav() {
@@ -995,7 +1020,7 @@ function showPage(id) {
 }
 
 function renderPage(id) {
-  ({dashboard:renderDashboard,mgr:renderMgr,savings:renderSavings,loans:renderLoans,repayments:renderRepayments,members:renderMembers,'member-portal':renderMemberPortal})[id]?.();
+  ({dashboard:renderDashboard,mgr:renderMgr,savings:renderSavings,loans:renderLoans,repayments:renderRepayments,'monthly-totals':renderMonthlyTotals,members:renderMembers,'member-portal':renderMemberPortal})[id]?.();
 }
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -1463,6 +1488,77 @@ function renderRepayments() {
       <td class="green">${r.interestPaid>0?fmtKes(r.interestPaid):'—'}</td>
       <td>${fmtKes(r.outstandingAfter)}</td>
       <td style="font-size:12px;max-width:220px;word-break:break-word">${dist}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║  MONTHLY TOTALS                                          ║
+// ╚══════════════════════════════════════════════════════════╝
+/**
+ * Aggregate savings, MGR and repayment activity by calendar month + year.
+ * Only months with at least one transaction (in any category) are included.
+ * Returned rows are sorted newest month first.
+ */
+function computeMonthlyTotals() {
+  const map = {}; // "YYYY-MM" -> row
+  function getRow(year, month) {
+    const key = year + '-' + String(month).padStart(2, '0');
+    if (!map[key]) {
+      map[key] = {
+        year, month,
+        savRegular: 0, savInterest: 0, savReinvest: 0,
+        mgrCollected: 0, mgrReinvested: 0,
+        repayPrincipal: 0, repayInterest: 0
+      };
+    }
+    return map[key];
+  }
+
+  DB.savings.forEach(s => {
+    const row = getRow(s.year, s.month);
+    if (s.isInterest) row.savInterest += s.amount;
+    else if (s.isMgrReinvestment) row.savReinvest += s.amount;
+    else row.savRegular += s.amount;
+  });
+
+  DB.mgr.forEach(m => {
+    const row = getRow(m.year, m.month);
+    row.mgrCollected += m.contributorIdxs.length * 1000;
+    row.mgrReinvested += (m.reinvestAmount || 0);
+  });
+
+  DB.repayments.forEach(r => {
+    const year = parseInt(r.date.split('-')[0], 10);
+    const month = parseInt(r.date.split('-')[1], 10);
+    const row = getRow(year, month);
+    row.repayPrincipal += r.principalPaid;
+    row.repayInterest += r.interestPaid;
+  });
+
+  return Object.values(map).sort((a, b) => (b.year - a.year) || (b.month - a.month));
+}
+
+function renderMonthlyTotals() {
+  const tbody = document.getElementById('monthly-totals-tbody');
+  const rows = computeMonthlyTotals();
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="11" class="center muted">No activity recorded yet</td></tr>'; return; }
+  tbody.innerHTML = rows.map(r => {
+    const savTotal = r.savRegular + r.savInterest + r.savReinvest;
+    const mgrTaken = r.mgrCollected - r.mgrReinvested;
+    const repayTotal = r.repayPrincipal + r.repayInterest;
+    return `<tr>
+      <td class="bold">${MONTHS[r.month - 1]} ${r.year}</td>
+      <td style="border-left:1px solid var(--border)">${r.savRegular > 0 ? fmtKes(r.savRegular) : '—'}</td>
+      <td class="green">${r.savInterest > 0 ? fmtKes(r.savInterest) : '—'}</td>
+      <td class="gold">${r.savReinvest > 0 ? fmtKes(r.savReinvest) : '—'}</td>
+      <td class="bold">${fmtKes(savTotal)}</td>
+      <td style="border-left:1px solid var(--border)">${r.mgrCollected > 0 ? fmtKes(r.mgrCollected) : '—'}</td>
+      <td class="gold">${r.mgrReinvested > 0 ? fmtKes(r.mgrReinvested) : '—'}</td>
+      <td>${r.mgrCollected > 0 ? fmtKes(mgrTaken) : '—'}</td>
+      <td style="border-left:1px solid var(--border)">${r.repayPrincipal > 0 ? fmtKes(r.repayPrincipal) : '—'}</td>
+      <td class="green">${r.repayInterest > 0 ? fmtKes(r.repayInterest) : '—'}</td>
+      <td class="bold">${repayTotal > 0 ? fmtKes(repayTotal) : '—'}</td>
     </tr>`;
   }).join('');
 }
